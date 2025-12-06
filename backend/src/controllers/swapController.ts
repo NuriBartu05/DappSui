@@ -1,6 +1,14 @@
 import { Request, Response } from 'express';
 import { Transaction } from '@mysten/sui/transactions';
-import { getAftermathInstance, suiClient, SPONSOR_KEYPAIR, SPONSOR_ADDRESS, TREASURY_ADDRESS, SERVICE_FEE_BPS, COMMON_TOKENS } from '../config/sui';
+import { 
+  getAftermathInstance, 
+  suiClient, 
+  TREASURY_ADDRESS, 
+  SERVICE_FEE_BPS,
+  ENOKI_API_KEY,
+  ENOKI_API_URL,
+  normalizeTokenType
+} from '../config/sui';
 import {
   QuoteRequest,
   QuoteResponse,
@@ -27,7 +35,6 @@ export async function getQuote(req: Request, res: Response) {
   try {
     const { tokenInType, tokenOutType, amount } = req.query as unknown as QuoteRequest;
 
-    // Validation
     if (!tokenInType || !tokenOutType || !amount) {
       return res.status(400).json({
         error: 'Missing required parameters: tokenInType, tokenOutType, amount',
@@ -37,10 +44,13 @@ export async function getQuote(req: Request, res: Response) {
     const aftermath = await getAftermathInstance();
     const router = aftermath.Router();
 
-    // Get the best route
+    // Normalize token types
+    const normalizedTokenIn = normalizeTokenType(tokenInType);
+    const normalizedTokenOut = normalizeTokenType(tokenOutType);
+
     const route = await router.getCompleteTradeRouteGivenAmountIn({
-      coinInType: tokenInType,
-      coinOutType: tokenOutType,
+      coinInType: normalizedTokenIn,
+      coinOutType: normalizedTokenOut,
       coinInAmount: BigInt(amount),
     });
 
@@ -79,7 +89,6 @@ export async function buildSwap(req: Request, res: Response) {
   try {
     const { userAddress, tokenInType, tokenOutType, amount, slippage } = req.body as SwapRequest;
 
-    // Validation
     if (!userAddress || !tokenInType || !tokenOutType || !amount || slippage === undefined) {
       return res.status(400).json({
         error: 'Missing required parameters',
@@ -89,10 +98,12 @@ export async function buildSwap(req: Request, res: Response) {
     const aftermath = await getAftermathInstance();
     const router = aftermath.Router();
 
-    // Get the best route
+    const normalizedTokenIn = normalizeTokenType(tokenInType);
+    const normalizedTokenOut = normalizeTokenType(tokenOutType);
+
     const route = await router.getCompleteTradeRouteGivenAmountIn({
-      coinInType: tokenInType,
-      coinOutType: tokenOutType,
+      coinInType: normalizedTokenIn,
+      coinOutType: normalizedTokenOut,
       coinInAmount: BigInt(amount),
     });
 
@@ -102,23 +113,20 @@ export async function buildSwap(req: Request, res: Response) {
       });
     }
 
-    // Calculate minimum amount out based on slippage
-    const minAmountOut = calculateMinAmountOut(route.coinOut.amount.toString(), slippage);
-
-    // Build transaction
     const tx = new Transaction();
     tx.setSender(userAddress);
 
-    // Use Aftermath's built-in transaction builder
     const routeTx = await route.getTransaction({
-      slippage: slippage / 10000, // Convert from bps to decimal
+      slippage: slippage / 10000,
       walletAddress: userAddress,
     });
 
-    // Merge the route transaction into our transaction
-    tx.add(routeTx);
+    // Merge route transaction
+    const routeCommands = routeTx.getData();
+    routeCommands.commands.forEach((cmd: any) => {
+      tx.add(cmd);
+    });
 
-    // Serialize transaction
     const txBytes = await tx.build({ client: suiClient });
     const txBytesBase64 = Buffer.from(txBytes).toString('base64');
 
@@ -144,8 +152,8 @@ export async function buildSwap(req: Request, res: Response) {
 
 /**
  * POST /api/swap/build-sponsored
- * Build a sponsored swap transaction where user pays fees in USDC/USDT
- * Backend pays SUI gas fees
+ * Build a sponsored swap using Enoki Gas Station
+ * User pays service fee in USDC, Enoki sponsors SUI gas
  */
 export async function buildSponsoredSwap(req: Request, res: Response) {
   try {
@@ -158,7 +166,6 @@ export async function buildSponsoredSwap(req: Request, res: Response) {
       paymentTokenType = tokenInType,
     } = req.body as SponsoredSwapRequest;
 
-    // Validation
     if (!userAddress || !tokenInType || !tokenOutType || !amount || slippage === undefined) {
       return res.status(400).json({
         error: 'Missing required parameters',
@@ -168,14 +175,17 @@ export async function buildSponsoredSwap(req: Request, res: Response) {
     const aftermath = await getAftermathInstance();
     const router = aftermath.Router();
 
-    // Calculate service fee and amount for swap
+    // Calculate service fee and swap amount
     const serviceFee = calculateServiceFee(amount, SERVICE_FEE_BPS);
     const amountForSwap = calculateAmountAfterFee(amount, SERVICE_FEE_BPS);
 
-    // Get the best route for the swap amount (after fee deduction)
+    const normalizedTokenIn = normalizeTokenType(tokenInType);
+    const normalizedTokenOut = normalizeTokenType(tokenOutType);
+    const normalizedPaymentToken = normalizeTokenType(paymentTokenType);
+
     const route = await router.getCompleteTradeRouteGivenAmountIn({
-      coinInType: tokenInType,
-      coinOutType: tokenOutType,
+      coinInType: normalizedTokenIn,
+      coinOutType: normalizedTokenOut,
       coinInAmount: BigInt(amountForSwap),
     });
 
@@ -185,20 +195,14 @@ export async function buildSponsoredSwap(req: Request, res: Response) {
       });
     }
 
-    // Estimate gas cost in payment token (simplified - in production, fetch real price)
-    const estimatedGasBudget = route.gasBudget?.toString() || '1000000';
-    const gasCostInPaymentToken = '0'; // Simplified for demo
-
-    // Build transaction
+    // Build the transaction
     const tx = new Transaction();
     tx.setSender(userAddress);
-    tx.setGasOwner(SPONSOR_ADDRESS); // Backend sponsors the gas
 
-    // Step 1: Split the input coins
-    // Get user's coin objects for the payment token
+    // Get user's coins for payment token
     const userCoins = await suiClient.getCoins({
       owner: userAddress,
-      coinType: paymentTokenType,
+      coinType: normalizedPaymentToken,
     });
 
     if (userCoins.data.length === 0) {
@@ -207,46 +211,80 @@ export async function buildSponsoredSwap(req: Request, res: Response) {
       });
     }
 
-    // Merge all user coins into one
-    const [primaryCoin, ...restCoins] = userCoins.data.map(coin => coin.coinObjectId);
+    // Merge all user coins
+    const coinIds = userCoins.data.map(coin => coin.coinObjectId);
+    const [primaryCoin, ...restCoins] = coinIds;
+    
     if (restCoins.length > 0) {
-      tx.mergeCoins(primaryCoin, restCoins);
+      tx.mergeCoins(tx.object(primaryCoin), restCoins.map(id => tx.object(id)));
     }
 
-    // Split: one for service fee, one for swap
-    const [feeCoin, swapCoin] = tx.splitCoins(primaryCoin, [
+    // Split coins: service fee + swap amount
+    const [feeCoin, swapCoin] = tx.splitCoins(tx.object(primaryCoin), [
       tx.pure.u64(serviceFee),
       tx.pure.u64(amountForSwap),
     ]);
 
-    // Step 2: Transfer service fee to treasury
-    tx.transferObjects([feeCoin], TREASURY_ADDRESS);
+    // Transfer service fee to treasury
+    tx.transferObjects([feeCoin], tx.pure.address(TREASURY_ADDRESS));
 
-    // Step 3: Execute the swap with the swap coin
+    // Build the swap transaction using the split coin
     const routeTx = await route.getTransaction({
       slippage: slippage / 10000,
       walletAddress: userAddress,
-      coinInId: swapCoin, // Use the split coin for swap
     });
 
-    tx.add(routeTx);
+    // Merge route commands
+    const routeCommands = routeTx.getData();
+    routeCommands.commands.forEach((cmd: any) => {
+      tx.add(cmd);
+    });
 
-    // Set gas budget
+    const estimatedGasBudget = route.gasBudget?.toString() || '10000000';
     tx.setGasBudget(BigInt(estimatedGasBudget));
 
     // Build transaction bytes
     const txBytes = await tx.build({ client: suiClient });
+    const txBytesBase64 = Buffer.from(txBytes).toString('base64');
 
-    // Sign with sponsor keypair (gas owner signature)
-    const sponsorSignature = await SPONSOR_KEYPAIR.signTransaction(txBytes);
+    // Call Enoki Gas Station API for sponsor signature
+    let sponsorSignature: string;
+    
+    try {
+      const enokiResponse = await fetch(`${ENOKI_API_URL}/gas-station/v1/sponsor`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${ENOKI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          network: 'testnet',
+          txBytes: txBytesBase64,
+        }),
+      });
+
+      if (!enokiResponse.ok) {
+        const errorData = await enokiResponse.json();
+        throw new Error(`Enoki API error: ${errorData.message || enokiResponse.statusText}`);
+      }
+
+      const enokiData = await enokiResponse.json();
+      sponsorSignature = enokiData.signature;
+    } catch (enokiError: any) {
+      console.error('Enoki Gas Station error:', enokiError);
+      return res.status(500).json({
+        error: 'Failed to get sponsor signature from Enoki',
+        details: enokiError.message,
+      });
+    }
 
     const response: SponsoredSwapResponse = {
-      txBytes: Buffer.from(txBytes).toString('base64'),
-      sponsorSignature: sponsorSignature.signature,
+      txBytes: txBytesBase64,
+      sponsorSignature,
       estimatedAmountOut: route.coinOut.amount.toString(),
-      gasCostInPaymentToken,
+      gasCostInPaymentToken: '0', // Covered by sponsor
       serviceFee,
-      totalCost: (BigInt(serviceFee) + BigInt(gasCostInPaymentToken)).toString(),
+      totalCost: serviceFee,
     };
 
     res.json(response);
@@ -261,34 +299,34 @@ export async function buildSponsoredSwap(req: Request, res: Response) {
 
 /**
  * POST /api/refuel
- * Swap liquid tokens (USDC/USDT/DEEP) for exactly 1 or 5 SUI
+ * Swap liquid tokens for exactly 1 or 5 SUI (Gas Station feature)
  */
 export async function buildRefuel(req: Request, res: Response) {
   try {
     const { userAddress, tokenInType, amountOut, slippage } = req.body as RefuelRequest;
 
-    // Validation
     if (!userAddress || !tokenInType || !amountOut || slippage === undefined) {
       return res.status(400).json({
         error: 'Missing required parameters',
       });
     }
 
-    // Validate amountOut is 1 or 5 SUI
-    const validAmounts = ['1000000000', '5000000000']; // 1 SUI and 5 SUI in smallest units
+    const validAmounts = ['1000000000', '5000000000'];
     if (!validAmounts.includes(amountOut)) {
       return res.status(400).json({
-        error: 'amountOut must be 1 or 5 SUI (in smallest units: 1000000000 or 5000000000)',
+        error: 'amountOut must be 1 or 5 SUI (1000000000 or 5000000000)',
       });
     }
 
     const aftermath = await getAftermathInstance();
     const router = aftermath.Router();
 
-    // Get route for exact output (reverse lookup)
+    const normalizedTokenIn = normalizeTokenType(tokenInType);
+    const SUI_TYPE = '0x2::sui::SUI';
+
     const route = await router.getCompleteTradeRouteGivenAmountOut({
-      coinInType: tokenInType,
-      coinOutType: COMMON_TOKENS.SUI,
+      coinInType: normalizedTokenIn,
+      coinOutType: SUI_TYPE,
       coinOutAmount: BigInt(amountOut),
     });
 
@@ -298,7 +336,6 @@ export async function buildRefuel(req: Request, res: Response) {
       });
     }
 
-    // Build transaction
     const tx = new Transaction();
     tx.setSender(userAddress);
 
@@ -307,9 +344,11 @@ export async function buildRefuel(req: Request, res: Response) {
       walletAddress: userAddress,
     });
 
-    tx.add(routeTx);
+    const routeCommands = routeTx.getData();
+    routeCommands.commands.forEach((cmd: any) => {
+      tx.add(cmd);
+    });
 
-    // Serialize transaction
     const txBytes = await tx.build({ client: suiClient });
     const txBytesBase64 = Buffer.from(txBytes).toString('base64');
 
@@ -341,7 +380,6 @@ export async function buildDustSweep(req: Request, res: Response) {
   try {
     const { userAddress, tokens, targetTokenType, slippage } = req.body as DustSweepRequest;
 
-    // Validation
     if (!userAddress || !tokens || tokens.length === 0 || !targetTokenType || slippage === undefined) {
       return res.status(400).json({
         error: 'Missing required parameters',
@@ -357,50 +395,52 @@ export async function buildDustSweep(req: Request, res: Response) {
     const swaps: DustSweepResponse['swaps'] = [];
     let totalEstimatedOut = BigInt(0);
 
-    // Process each dust token
+    const normalizedTargetToken = normalizeTokenType(targetTokenType);
+
     for (const dustToken of tokens) {
       try {
-        // Get user's coins for this token type
+        const normalizedDustToken = normalizeTokenType(dustToken.tokenType);
+
         const userCoins = await suiClient.getCoins({
           owner: userAddress,
-          coinType: dustToken.tokenType,
+          coinType: normalizedDustToken,
         });
 
         if (userCoins.data.length === 0) {
-          console.log(`No coins found for ${dustToken.tokenType}, skipping`);
+          console.log(`No coins found for ${normalizedDustToken}, skipping`);
           continue;
         }
 
-        // Merge all coins of this type
-        const [primaryCoin, ...restCoins] = userCoins.data.map(coin => coin.coinObjectId);
+        const coinIds = userCoins.data.map(coin => coin.coinObjectId);
+        const [primaryCoin, ...restCoins] = coinIds;
+
         if (restCoins.length > 0) {
-          tx.mergeCoins(primaryCoin, restCoins);
+          tx.mergeCoins(tx.object(primaryCoin), restCoins.map(id => tx.object(id)));
         }
 
-        // Get route for this swap
         const route = await router.getCompleteTradeRouteGivenAmountIn({
-          coinInType: dustToken.tokenType,
-          coinOutType: targetTokenType,
+          coinInType: normalizedDustToken,
+          coinOutType: normalizedTargetToken,
           coinInAmount: BigInt(dustToken.balance),
         });
 
         if (!route) {
-          console.log(`No route found for ${dustToken.tokenType}, skipping`);
+          console.log(`No route found for ${normalizedDustToken}, skipping`);
           continue;
         }
 
-        // Add swap to transaction
         const routeTx = await route.getTransaction({
           slippage: slippage / 10000,
           walletAddress: userAddress,
-          coinInId: primaryCoin,
         });
 
-        tx.add(routeTx);
+        const routeCommands = routeTx.getData();
+        routeCommands.commands.forEach((cmd: any) => {
+          tx.add(cmd);
+        });
 
-        // Track swap details
         swaps.push({
-          tokenIn: dustToken.tokenType,
+          tokenIn: normalizedDustToken,
           amountIn: dustToken.balance,
           estimatedOut: route.coinOut.amount.toString(),
         });
@@ -408,7 +448,6 @@ export async function buildDustSweep(req: Request, res: Response) {
         totalEstimatedOut += route.coinOut.amount;
       } catch (error) {
         console.error(`Error processing ${dustToken.tokenType}:`, error);
-        // Continue with other tokens
       }
     }
 
@@ -418,7 +457,6 @@ export async function buildDustSweep(req: Request, res: Response) {
       });
     }
 
-    // Serialize transaction
     const txBytes = await tx.build({ client: suiClient });
     const txBytesBase64 = Buffer.from(txBytes).toString('base64');
 
