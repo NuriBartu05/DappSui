@@ -2,6 +2,14 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 // Type definitions
+export interface TokenInfo {
+  symbol: string;
+  type: string;
+  decimals: number;
+  name: string;
+  logo?: string;
+}
+
 export interface QuoteRequest {
   tokenInType: string;
   tokenOutType: string;
@@ -64,6 +72,13 @@ export interface RefuelResponse {
     protocols: string[];
     estimatedGas: string;
   };
+  sponsorSignature?: string;
+}
+
+export interface BalanceInfo {
+  coinType: string;
+  totalBalance: string;
+  coinObjectCount: number;
 }
 
 // API Client
@@ -72,6 +87,38 @@ class DexAggregatorAPI {
 
   constructor(baseUrl: string = API_BASE_URL) {
     this.baseUrl = baseUrl;
+  }
+
+  private async handleResponse<T>(response: Response): Promise<T> {
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+      throw new Error(error.error || error.message || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  /**
+   * Health check
+   */
+  async healthCheck(): Promise<{ status: string; network: string }> {
+    const response = await fetch(`${this.baseUrl}/health`);
+    return this.handleResponse(response);
+  }
+
+  /**
+   * Get supported tokens
+   */
+  async getTokens(): Promise<{ tokens: TokenInfo[] }> {
+    const response = await fetch(`${this.baseUrl}/api/tokens`);
+    return this.handleResponse(response);
+  }
+
+  /**
+   * Get user balances
+   */
+  async getBalances(address: string): Promise<{ address: string; balances: BalanceInfo[] }> {
+    const response = await fetch(`${this.baseUrl}/api/balances/${address}`);
+    return this.handleResponse(response);
   }
 
   /**
@@ -84,13 +131,7 @@ class DexAggregatorAPI {
     url.searchParams.append('amount', params.amount);
 
     const response = await fetch(url.toString());
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Failed to get quote');
-    }
-
-    return response.json();
+    return this.handleResponse(response);
   }
 
   /**
@@ -99,71 +140,34 @@ class DexAggregatorAPI {
   async buildSwap(params: SwapRequest): Promise<SwapResponse> {
     const response = await fetch(`${this.baseUrl}/api/swap/build`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Failed to build swap');
-    }
-
-    return response.json();
+    return this.handleResponse(response);
   }
 
   /**
-   * Build sponsored swap transaction (Enoki pays gas, user pays fee in USDC)
+   * Build sponsored swap transaction (Enoki pays gas)
    */
   async buildSponsoredSwap(params: SponsoredSwapRequest): Promise<SponsoredSwapResponse> {
     const response = await fetch(`${this.baseUrl}/api/swap/build-sponsored`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Failed to build sponsored swap');
-    }
-
-    return response.json();
+    return this.handleResponse(response);
   }
 
   /**
-   * Build refuel transaction (swap to SUI)
+   * Build refuel transaction (get SUI)
    */
   async buildRefuel(params: RefuelRequest): Promise<RefuelResponse> {
     const response = await fetch(`${this.baseUrl}/api/refuel`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Failed to build refuel transaction');
-    }
-
-    return response.json();
-  }
-
-  /**
-   * Health check
-   */
-  async healthCheck(): Promise<{ status: string; network: string }> {
-    const response = await fetch(`${this.baseUrl}/health`);
-    
-    if (!response.ok) {
-      throw new Error('Backend is not healthy');
-    }
-
-    return response.json();
+    return this.handleResponse(response);
   }
 }
 
@@ -171,34 +175,41 @@ class DexAggregatorAPI {
 export const dexApi = new DexAggregatorAPI();
 
 // Utility functions
+
 /**
  * Convert base64 transaction bytes to Uint8Array
- * CRITICAL: This fixes the common bug where base64 strings aren't properly converted
  */
 export function txBytesFromBase64(base64: string): Uint8Array {
-  // Remove any whitespace
-  const cleanBase64 = base64.replace(/\s/g, '');
-  
-  // Decode base64 to binary string
-  const binaryString = atob(cleanBase64);
-  
-  // Convert binary string to Uint8Array
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+  // Handle browser and Node.js environments
+  if (typeof window !== 'undefined' && window.atob) {
+    const binaryString = window.atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  } else {
+    // Node.js environment
+    return new Uint8Array(Buffer.from(base64, 'base64'));
   }
-  
-  return bytes;
 }
 
 /**
  * Format token amount for display
  */
-export function formatTokenAmount(amount: string, decimals: number): string {
+export function formatTokenAmount(
+  amount: string,
+  decimals: number,
+  displayDecimals: number = 4
+): string {
   const num = Number(amount) / Math.pow(10, decimals);
+  
+  if (num === 0) return '0';
+  if (num < 0.0001) return '<0.0001';
+  
   return num.toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 6,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: displayDecimals,
   });
 }
 
@@ -207,6 +218,37 @@ export function formatTokenAmount(amount: string, decimals: number): string {
  */
 export function parseTokenAmount(amount: string, decimals: number): string {
   const num = parseFloat(amount);
-  if (isNaN(num)) return '0';
+  if (isNaN(num) || num <= 0) return '0';
   return Math.floor(num * Math.pow(10, decimals)).toString();
 }
+
+/**
+ * Shorten address for display
+ */
+export function shortenAddress(address: string, chars: number = 4): string {
+  if (!address) return '';
+  return `${address.slice(0, chars + 2)}...${address.slice(-chars)}`;
+}
+
+/**
+ * Get explorer URL for transaction
+ */
+export function getExplorerUrl(digest: string, network: string = 'testnet'): string {
+  return `https://suiscan.xyz/${network}/tx/${digest}`;
+}
+
+// Default tokens for testnet
+export const DEFAULT_TOKENS: TokenInfo[] = [
+  {
+    symbol: 'SUI',
+    type: '0x2::sui::SUI',
+    decimals: 9,
+    name: 'Sui',
+    logo: 'https://cryptologos.cc/logos/sui-sui-logo.png',
+  },
+];
+
+// Token decimals lookup
+export const TOKEN_DECIMALS: Record<string, number> = {
+  '0x2::sui::SUI': 9,
+};
