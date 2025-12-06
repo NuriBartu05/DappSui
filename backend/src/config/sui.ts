@@ -1,12 +1,11 @@
 import { SuiClient } from '@mysten/sui/client';
-import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Aftermath } from 'aftermath-ts-sdk';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
 
 // Validate required environment variables
-const requiredEnvVars = ['SUI_NODE_URL', 'SPONSOR_PRIVATE_KEY', 'TREASURY_ADDRESS'];
+const requiredEnvVars = ['SUI_NODE_URL', 'TREASURY_ADDRESS', 'ENOKI_API_KEY'];
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
     throw new Error(`Missing required environment variable: ${envVar}`);
@@ -19,25 +18,22 @@ export const SUI_NODE_URL = process.env.SUI_NODE_URL!;
 export const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS!;
 export const SERVICE_FEE_BPS = parseInt(process.env.SERVICE_FEE_BPS || '30', 10);
 
+// Enoki Configuration
+export const ENOKI_API_KEY = process.env.ENOKI_API_KEY!;
+export const ENOKI_API_URL = process.env.ENOKI_API_URL || 'https://api.enoki.mystenlabs.com';
+
 // Initialize Sui Client for Testnet
 export const suiClient = new SuiClient({
   url: SUI_NODE_URL,
 });
 
-// Initialize Sponsor Keypair
-let sponsorKeypair: Ed25519Keypair;
-try {
-  const privateKeyBytes = Buffer.from(process.env.SPONSOR_PRIVATE_KEY!, 'base64');
-  sponsorKeypair = Ed25519Keypair.fromSecretKey(privateKeyBytes);
-} catch (error) {
-  throw new Error('Invalid SPONSOR_PRIVATE_KEY format. Must be base64 encoded.');
-}
-
-export const SPONSOR_KEYPAIR = sponsorKeypair;
-export const SPONSOR_ADDRESS = sponsorKeypair.toSuiAddress();
-
-console.log(`Sponsor Address: ${SPONSOR_ADDRESS}`);
-console.log(`Treasury Address: ${TREASURY_ADDRESS}`);
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log('Configuration Loaded:');
+console.log(`Network: ${NETWORK}`);
+console.log(`Treasury: ${TREASURY_ADDRESS}`);
+console.log(`Service Fee: ${SERVICE_FEE_BPS} bps (${SERVICE_FEE_BPS / 100}%)`);
+console.log(`Enoki Integration: Enabled`);
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
 // Initialize Aftermath SDK for Testnet
 class AftermathService {
@@ -46,15 +42,11 @@ class AftermathService {
   static async getInstance(): Promise<Aftermath> {
     if (!this.instance) {
       try {
-        // Initialize Aftermath SDK with Testnet configuration
         this.instance = new Aftermath(NETWORK as 'testnet');
-        
-        // Verify initialization
         await this.instance.init();
-        
-        console.log('Aftermath SDK initialized successfully for Testnet');
+        console.log('✅ Aftermath SDK initialized successfully for Testnet');
       } catch (error) {
-        console.error('Failed to initialize Aftermath SDK:', error);
+        console.error('❌ Failed to initialize Aftermath SDK:', error);
         throw new Error('Could not initialize Aftermath SDK');
       }
     }
@@ -67,9 +59,9 @@ export const getAftermathInstance = () => AftermathService.getInstance();
 // Common Token Types on Testnet
 export const COMMON_TOKENS = {
   SUI: '0x2::sui::SUI',
-  USDC: '0x_usdc_testnet_address::usdc::USDC', // Replace with actual testnet address
-  USDT: '0x_usdt_testnet_address::usdt::USDT', // Replace with actual testnet address
-  DEEP: '0x_deep_testnet_address::deep::DEEP', // Replace with actual testnet address
+  // Add testnet token addresses as you discover them
+  // USDC: '0x...',
+  // USDT: '0x...',
 };
 
 // Helper function to validate Sui address
@@ -79,13 +71,33 @@ export function isValidSuiAddress(address: string): boolean {
 
 // Helper function to normalize token type
 export function normalizeTokenType(tokenType: string): string {
-  // Remove leading/trailing whitespace
   tokenType = tokenType.trim();
   
-  // Ensure it starts with 0x
   if (!tokenType.startsWith('0x')) {
     tokenType = '0x' + tokenType;
   }
   
   return tokenType;
+}
+
+// Helper to verify Enoki configuration
+export async function verifyEnokiConfiguration(): Promise<boolean> {
+  try {
+    const response = await fetch(`${ENOKI_API_URL}/gas-station/v1/health`, {
+      headers: {
+        'Authorization': `Bearer ${ENOKI_API_KEY}`,
+      },
+    });
+    
+    if (response.ok) {
+      console.log('✅ Enoki Gas Station connection verified');
+      return true;
+    } else {
+      console.warn('⚠️ Enoki Gas Station health check failed');
+      return false;
+    }
+  } catch (error) {
+    console.error('❌ Enoki Gas Station connection error:', error);
+    return false;
+  }
 }
