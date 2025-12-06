@@ -2,6 +2,14 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 // Type definitions
+export interface Token {
+  symbol: string;
+  coinType: string;
+  decimals: number;
+  name: string;
+  logo?: string;
+}
+
 export interface TokenInfo {
   symbol: string;
   type: string;
@@ -17,7 +25,8 @@ export interface QuoteRequest {
 }
 
 export interface QuoteResponse {
-  estimatedAmountOut: string;
+  amountIn: string;
+  amountOut: string;
   route: {
     path: string[];
     protocols: string[];
@@ -27,11 +36,11 @@ export interface QuoteResponse {
 }
 
 export interface SwapRequest {
-  userAddress: string;
-  tokenInType: string;
-  tokenOutType: string;
-  amount: string;
-  slippage: number;
+  walletAddress: string;
+  coinTypeIn: string;
+  coinTypeOut: string;
+  amountIn: string;
+  slippageBps: number;
 }
 
 export interface SwapResponse {
@@ -44,24 +53,19 @@ export interface SwapResponse {
   };
 }
 
-export interface SponsoredSwapRequest extends SwapRequest {
-  paymentTokenType?: string;
-}
+export interface SponsoredSwapRequest extends SwapRequest {}
 
 export interface SponsoredSwapResponse {
   txBytes: string;
-  sponsorSignature: string;
+  sponsorSignature?: string;
   estimatedAmountOut: string;
-  gasCostInPaymentToken: string;
   serviceFee: string;
-  totalCost: string;
 }
 
 export interface RefuelRequest {
-  userAddress: string;
-  tokenInType: string;
+  walletAddress: string;
+  coinTypeIn: string;
   amountOut: string;
-  slippage: number;
 }
 
 export interface RefuelResponse {
@@ -77,8 +81,8 @@ export interface RefuelResponse {
 
 export interface BalanceInfo {
   coinType: string;
-  totalBalance: string;
-  coinObjectCount: number;
+  balance: string;
+  decimals: number;
 }
 
 // API Client
@@ -98,40 +102,56 @@ class DexAggregatorAPI {
   }
 
   /**
-   * Health check
-   */
-  async healthCheck(): Promise<{ status: string; network: string }> {
-    const response = await fetch(`${this.baseUrl}/health`);
-    return this.handleResponse(response);
-  }
-
-  /**
    * Get supported tokens
    */
-  async getTokens(): Promise<{ tokens: TokenInfo[] }> {
+  async getTokens(): Promise<Token[]> {
     const response = await fetch(`${this.baseUrl}/api/tokens`);
-    return this.handleResponse(response);
+    const data = await this.handleResponse<{ tokens: TokenInfo[] }>(response);
+    // Transform to Token format
+    return data.tokens.map((t) => ({
+      symbol: t.symbol,
+      coinType: t.type,
+      decimals: t.decimals,
+      name: t.name,
+      logo: t.logo,
+    }));
   }
 
   /**
    * Get user balances
    */
-  async getBalances(address: string): Promise<{ address: string; balances: BalanceInfo[] }> {
+  async getBalances(address: string): Promise<BalanceInfo[]> {
     const response = await fetch(`${this.baseUrl}/api/balances/${address}`);
-    return this.handleResponse(response);
+    const data = await this.handleResponse<{ address: string; balances: any[] }>(response);
+    return data.balances.map((b) => ({
+      coinType: b.coinType,
+      balance: b.totalBalance || b.balance || '0',
+      decimals: TOKEN_DECIMALS[b.coinType] || 9,
+    }));
   }
 
   /**
    * Get swap quote
    */
-  async getQuote(params: QuoteRequest): Promise<QuoteResponse> {
+  async getQuote(coinTypeIn: string, coinTypeOut: string, amountIn: string): Promise<QuoteResponse> {
     const url = new URL(`${this.baseUrl}/api/quote`);
-    url.searchParams.append('tokenInType', params.tokenInType);
-    url.searchParams.append('tokenOutType', params.tokenOutType);
-    url.searchParams.append('amount', params.amount);
+    url.searchParams.append('tokenInType', coinTypeIn);
+    url.searchParams.append('tokenOutType', coinTypeOut);
+    url.searchParams.append('amount', amountIn);
 
     const response = await fetch(url.toString());
-    return this.handleResponse(response);
+    const data = await this.handleResponse<{
+      estimatedAmountOut: string;
+      route: any;
+      priceImpact: string;
+    }>(response);
+    
+    return {
+      amountIn,
+      amountOut: data.estimatedAmountOut,
+      route: data.route,
+      priceImpact: data.priceImpact,
+    };
   }
 
   /**
@@ -141,7 +161,13 @@ class DexAggregatorAPI {
     const response = await fetch(`${this.baseUrl}/api/swap/build`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      body: JSON.stringify({
+        userAddress: params.walletAddress,
+        tokenInType: params.coinTypeIn,
+        tokenOutType: params.coinTypeOut,
+        amount: params.amountIn,
+        slippage: params.slippageBps,
+      }),
     });
     return this.handleResponse(response);
   }
@@ -153,7 +179,13 @@ class DexAggregatorAPI {
     const response = await fetch(`${this.baseUrl}/api/swap/build-sponsored`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      body: JSON.stringify({
+        userAddress: params.walletAddress,
+        tokenInType: params.coinTypeIn,
+        tokenOutType: params.coinTypeOut,
+        amount: params.amountIn,
+        slippage: params.slippageBps,
+      }),
     });
     return this.handleResponse(response);
   }
@@ -165,7 +197,12 @@ class DexAggregatorAPI {
     const response = await fetch(`${this.baseUrl}/api/refuel`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      body: JSON.stringify({
+        userAddress: params.walletAddress,
+        tokenInType: params.coinTypeIn,
+        amountOut: params.amountOut,
+        slippage: 100, // Default 1% slippage for refuel
+      }),
     });
     return this.handleResponse(response);
   }
@@ -231,10 +268,13 @@ export function shortenAddress(address: string, chars: number = 4): string {
 }
 
 /**
- * Get explorer URL for transaction
+ * Get explorer URL for transaction or address
  */
-export function getExplorerUrl(digest: string, network: string = 'testnet'): string {
-  return `https://suiscan.xyz/${network}/tx/${digest}`;
+export function getExplorerUrl(hash: string, type: 'tx' | 'address' = 'tx', network: string = 'testnet'): string {
+  if (type === 'address') {
+    return `https://suiscan.xyz/${network}/account/${hash}`;
+  }
+  return `https://suiscan.xyz/${network}/tx/${hash}`;
 }
 
 // Default tokens for testnet
