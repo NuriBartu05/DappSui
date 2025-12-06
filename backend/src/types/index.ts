@@ -31,7 +31,6 @@ export interface SwapResponse {
 }
 
 export interface SponsoredSwapRequest extends SwapRequest {
-  // Additional field to specify payment token for fees
   paymentTokenType?: string;
 }
 
@@ -47,7 +46,7 @@ export interface SponsoredSwapResponse {
 export interface RefuelRequest {
   userAddress: string;
   tokenInType: string;
-  amountOut: string; // "1" or "5" SUI
+  amountOut: string; // "1000000000" (1 SUI) or "5000000000" (5 SUI)
   slippage: number;
 }
 
@@ -55,6 +54,7 @@ export interface RefuelResponse {
   txBytes: string;
   estimatedAmountIn: string;
   route: RouteInfo;
+  sponsorSignature?: string; // Optional - if Enoki sponsorship is available
 }
 
 export interface DustToken {
@@ -79,7 +79,23 @@ export interface DustSweepResponse {
   }[];
 }
 
+export interface TokenInfo {
+  symbol: string;
+  type: string;
+  decimals: number;
+  name: string;
+  logo?: string;
+}
+
+export interface BalanceInfo {
+  coinType: string;
+  totalBalance: string;
+  coinObjectCount: number;
+}
+
 export interface ApiError {
   error: string;
   details?: any;
+  timestamp?: string;
+  path?: string;
 }
