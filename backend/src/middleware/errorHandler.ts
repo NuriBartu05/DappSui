@@ -14,7 +14,12 @@ export function errorHandler(
   res: Response,
   next: NextFunction
 ) {
-  console.error('Error:', err);
+  console.error('❌ Error:', {
+    message: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+    path: req.path,
+    method: req.method,
+  });
 
   const status = err.status || 500;
   const message = err.message || 'Internal server error';
@@ -35,6 +40,7 @@ export function notFoundHandler(req: Request, res: Response) {
     error: 'Route not found',
     path: req.path,
     method: req.method,
+    suggestion: 'Check /api for available endpoints',
   });
 }
 
@@ -45,4 +51,14 @@ export function asyncHandler(fn: Function) {
   return (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
+}
+
+/**
+ * Create an application error
+ */
+export function createError(message: string, status: number = 500, details?: any): AppError {
+  const error: AppError = new Error(message);
+  error.status = status;
+  error.details = details;
+  return error;
 }
