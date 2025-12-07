@@ -1,0 +1,10 @@
+[package]
+name = "gasless_dex_tokens"
+version = "0.0.1"
+edition = "2024.beta"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+
+[addresses]
+gasless_dex_tokens = "0x0"
